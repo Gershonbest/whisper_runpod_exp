@@ -94,19 +94,17 @@ Use the RunPod API or dashboard to test your endpoint with a sample request:
 
 ```json
 {
-  "output": {
-    "data": {
-      "text": "Transcribed text...",
-      "diarized_transcript": "Speaker 1: Text...",
-      "translation": "Translated text...",
-      "diarized_translation": "Speaker 1: Translated...",
-      "duration": 123.45,
-      "language": "en",
-      "extra_data": {
-        "billing": {
-          "taskDuration": 123,
-          "taskCost": 0.0861
-        }
+  "data": {
+    "text": "Transcribed text...",
+    "diarized_transcript": "Speaker 1: Text...",
+    "translation": "Translated text...",
+    "diarized_translation": "Speaker 1: Translated...",
+    "duration": 123.45,
+    "language": "en",
+    "extra_data": {
+      "billing": {
+        "taskDuration": 123,
+        "taskCost": 0.0861
       }
     }
   }
