@@ -87,3 +87,11 @@ def get_whisper_model() -> WhisperModel:
         _whisper_model = loader.load()
     
     return _whisper_model
+
+
+def preload_whisper_model() -> None:
+    """
+    Preload the Whisper model (e.g. at startup to avoid cold start delays).
+    Safe to call from a thread (e.g. via run_in_threadpool).
+    """
+    get_whisper_model()

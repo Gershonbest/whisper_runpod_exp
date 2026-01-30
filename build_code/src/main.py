@@ -1,38 +1,26 @@
 """Main FastAPI application for the STT service."""
+import asyncio
 import os
 import warnings
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_settings
 from utils.logger import setup_logging, get_logger
-from utils.languages import SUPPORTED_LANGUAGES
-from schemas.requests import TranscriptionRequest
-from schemas.responses import TranscriptionResponse, HealthResponse, ErrorResponse
+from schemas.responses import ErrorResponse
 from services.transcription_service import TranscriptionService
-from models import get_whisper_model
+from models import get_whisper_model, preload_whisper_model
+from controllers import health_router, transcription_router, languages_router, queue_router
 import torch
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
 # Suppress libmpg123 stderr warnings (non-fatal MP3 decoding errors)
-# These warnings occur with some MP3 files but don't prevent processing
 os.environ["MPG123_QUIET"] = "1"
-
-# Redirect stderr at process level to suppress libmpg123 warnings globally
-# This is a fallback if the context manager doesn't catch everything
-import sys
-if hasattr(sys.stderr, 'fileno'):
-    try:
-        # Open /dev/null for stderr redirection (will be restored by context managers)
-        devnull = open(os.devnull, 'w')
-        # Note: We don't redirect here permanently, just set up for context managers
-        devnull.close()
-    except Exception:
-        pass  # Ignore if /dev/null is not available
 
 # Setup logging
 setup_logging()
@@ -41,7 +29,10 @@ logger = get_logger(__name__)
 # Get settings
 settings = get_settings()
 
-# Global service instance
+# Max concurrent GPU requests (queuing to avoid server overload)
+MAX_CONCURRENCY = settings.max_concurrency
+
+# Global service instance (used by controllers)
 transcription_service: TranscriptionService = None
 
 
@@ -49,131 +40,62 @@ transcription_service: TranscriptionService = None
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown."""
     global transcription_service
-    
-    # Startup
-    logger.info("Starting STT service...")
+
+    # ---- startup ----
+    logger.info("Starting application...")
+    logger.info("Preloading Whisper model (this may take a moment)...")
     try:
-        # Pre-load models
-        logger.info("Pre-loading Whisper model...")
-        get_whisper_model()
-        logger.info("Models loaded successfully")
-        
-        # Initialize transcription service
-        transcription_service = TranscriptionService()
-        logger.info("STT service started successfully")
-        
+        await run_in_threadpool(preload_whisper_model)
+        logger.info("Whisper model preloaded successfully")
     except Exception as e:
-        logger.error(f"Failed to start service: {e}", exc_info=True)
+        logger.error(f"Failed to preload Whisper model: {e}", exc_info=True)
         raise
-    
+
+    # Initialize transcription service
+    transcription_service = TranscriptionService()
+    app.state.transcription_service = transcription_service
+
+    # Queue state: semaphore limits concurrent GPU work; pending_requests counts queued items
+    app.state.gpu_semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+    app.state.pending_lock = asyncio.Lock()
+    app.state.pending_requests = 0
+    app.state.max_concurrency = MAX_CONCURRENCY
+
+    logger.info("Application ready to accept requests")
+
     yield
-    
-    # Shutdown
-    logger.info("Shutting down STT service...")
+
+    # ---- shutdown ----
+    logger.info("Shutting down application...")
     transcription_service = None
+    app.state.transcription_service = None
+    app.state.gpu_semaphore = None
+    app.state.pending_lock = None
+    app.state.pending_requests = 0
 
 
 # Create FastAPI app
 app = FastAPI(
     title=settings.api_title,
     version=settings.api_version,
-    description="Production-ready Speech-to-Text service with multi-language support and speaker diarization",
+    description="Production-ready Speech-to-Text service with multi-language support, speaker diarization, and request queuing to avoid server overload",
     lifespan=lifespan
 )
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-@app.get("/", response_model=HealthResponse)
-async def root():
-    """Root endpoint - returns health status."""
-    return await health()
-
-
-@app.get("/health", response_model=HealthResponse)
-@app.get("/ping")
-async def health():
-    """Health check endpoint."""
-    try:
-        models_loaded = transcription_service is not None
-        gpu_available = torch.cuda.is_available()
-        
-        return HealthResponse(
-            status="healthy" if models_loaded else "initializing",
-            version=settings.api_version,
-            models_loaded=models_loaded,
-            gpu_available=gpu_available
-        )
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return HealthResponse(
-            status="unhealthy",
-            version=settings.api_version,
-            models_loaded=False,
-            gpu_available=torch.cuda.is_available()
-        )
-
-
-@app.get("/api/v1/languages")
-async def get_languages():
-    """Get list of supported languages."""
-    return {
-        "languages": SUPPORTED_LANGUAGES,
-        "count": len(SUPPORTED_LANGUAGES)
-    }
-
-
-@app.post("/api/v1/transcribe", response_model=TranscriptionResponse)
-async def transcribe(request: TranscriptionRequest):
-    """
-    Transcribe audio file with optional speaker diarization.
-    
-    Supports:
-    - Multi-language transcription (auto-detect or specify)
-    - Speaker diarization
-    - Translation to English
-    - Custom number of speakers
-    """
-    if transcription_service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Service is not ready. Please try again in a moment."
-        )
-    
-    # Validate request
-    if not request.audio_url and not request.audio_file:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Either 'audio_url' or 'audio_file' must be provided"
-        )
-    
-    try:
-        response = transcription_service.process(request)
-        return response
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Transcription error: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Transcription failed: {str(e)}"
-        )
-
-
-@app.post("/invocations", response_model=TranscriptionResponse)
-async def invocations(request: TranscriptionRequest):
-    """
-    Legacy endpoint for backward compatibility.
-    """
-    return await transcribe(request)
+# Include routers (controllers)
+app.include_router(health_router)
+app.include_router(transcription_router)
+app.include_router(languages_router)
+app.include_router(queue_router)
 
 
 @app.exception_handler(Exception)

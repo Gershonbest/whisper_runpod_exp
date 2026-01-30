@@ -67,6 +67,9 @@ class Settings:
     # Batch processing (if needed)
     max_batch_size: int = int(os.getenv("MAX_BATCH_SIZE", "6"))
     batch_timeout: float = float(os.getenv("BATCH_TIMEOUT", "0.07"))
+    
+    # Queue / concurrency: max concurrent GPU requests (prevents server overload)
+    max_concurrency: int = int(os.getenv("MAX_CONCURRENCY", "5"))
 
 
 _settings: Optional[Settings] = None
