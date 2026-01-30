@@ -90,12 +90,9 @@ ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib:
 
 RUN ldconfig
 
-EXPOSE 8080
+EXPOSE 8000
 
 COPY ./build_code/src/ /opt/program/
 
-# Verify Python and packages are available
-RUN python3 --version && python3 -c "import fastapi; print('FastAPI imported successfully')"
-
-ENTRYPOINT ["python3", "serve.py"]
+ENTRYPOINT ["python3", "main.py"]
 

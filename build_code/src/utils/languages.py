@@ -1,38 +1,6 @@
-from pydantic import BaseModel
-from typing import Optional, List
-from pydantic_core import Url
-from enum import Enum 
-
-class EmbeddingTask(Enum):
-    RETRIEVE = "retrieve"
-    INGEST = "ingest"
-    
-class PayLoadData(BaseModel):
-    audio_url: Optional[str] = None
-    extra_data: Optional[dict] = {}
-    transcript: Optional[List[str]] = None
-    is_ml_agent: bool = False
-    # is_embedding: bool = False
-    # text: Optional[str] = None
-    # embedding_task: EmbeddingTask
-    dispatcher_endpoint: Optional[str] = None
-
-class TranscriptionOutputBody(BaseModel):
-    text: str = ""
-    diarized_transcript: str = ""
-    translation: str = ""
-    diarized_translation: str = ""
-    duration: float = None
-    language: str = None
-    extra_data: Optional[dict] = {}
-
-class EmbeddingOutputBody(BaseModel):
-    dim: List[int]
-    text: List[str] = None
-    vectors: List[List[float]] = []
-    extra_data: Optional[dict] = None
-
-supported_languages = {
+"""Supported languages for transcription."""
+# ISO 639-1 language codes supported by Whisper
+SUPPORTED_LANGUAGES = {
     "en": "English",
     "zh": "Chinese",
     "de": "German",
@@ -133,3 +101,13 @@ supported_languages = {
     "jw": "Javanese",
     "su": "Sundanese",
 }
+
+
+def is_language_supported(language_code: str) -> bool:
+    """Check if a language code is supported."""
+    return language_code.lower() in SUPPORTED_LANGUAGES
+
+
+def get_language_name(language_code: str) -> str:
+    """Get the full name of a language from its code."""
+    return SUPPORTED_LANGUAGES.get(language_code.lower(), language_code)
