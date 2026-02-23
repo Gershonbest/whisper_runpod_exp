@@ -192,7 +192,3 @@ The service supports 100+ languages including: English, Spanish, French, German,
    - Verify `REDIS_URL` is correct
    - Check Redis server is running
    - Verify network connectivity to Redis
-
-## License
-
-MIT
