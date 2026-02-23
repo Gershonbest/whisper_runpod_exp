@@ -16,6 +16,11 @@ from config import get_settings
 
 logger = get_logger(__name__)
 
+# Keep libmpg123 quiet globally, regardless of entrypoint
+os.environ.setdefault("MPG123_QUIET", "1")
+os.environ.setdefault("MPG123_VERBOSE", "0")
+os.environ.setdefault("MPG123_IGNORE_STREAMERROR", "1")
+
 
 @contextmanager
 def suppress_stderr():

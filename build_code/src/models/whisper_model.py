@@ -30,14 +30,12 @@ class WhisperModelLoader:
             return self.model
         
         logger.info("Loading Whisper model...")
-        
-        # Determine device
+
         if self.settings.whisper_device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             device = self.settings.whisper_device
-        
-        # Determine compute type
+
         if self.settings.whisper_compute_type == "auto":
             if device == "cuda":
                 compute_type = "int8_float16"

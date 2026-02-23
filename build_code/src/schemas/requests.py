@@ -73,7 +73,7 @@ class TranscriptionRequest(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "audio_url": "https://example.com/audio.mp3",
+                "audio_url": "https://2e97e207-backend.dataconect.com/api/v1/call-record-ext/documents/download/54e3ddb5-ad35-415a-8171-717420456940/CallRecord_1754597505874.mp3",
                 "language": "en",
                 "task": "transcribe",
                 "enable_diarization": True,

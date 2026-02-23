@@ -68,8 +68,12 @@ class Settings:
     max_batch_size: int = int(os.getenv("MAX_BATCH_SIZE", "6"))
     batch_timeout: float = float(os.getenv("BATCH_TIMEOUT", "0.07"))
     
-    # Queue / concurrency: max concurrent GPU requests (prevents server overload)
+    # Queue / concurrency configuration
     max_concurrency: int = int(os.getenv("MAX_CONCURRENCY", "5"))
+    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    queue_name: str = os.getenv("QUEUE_NAME", "transcription_queue")
+    queue_brpop_timeout: int = int(os.getenv("QUEUE_BRPOP_TIMEOUT", "5"))
+    queue_worker_enabled: bool = os.getenv("QUEUE_WORKER_ENABLED", "true").lower() == "true"
 
 
 _settings: Optional[Settings] = None
