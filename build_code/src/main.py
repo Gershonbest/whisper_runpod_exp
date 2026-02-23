@@ -4,7 +4,7 @@ import json
 import os
 import warnings
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
 from urllib.parse import urlsplit
 
 import redis.asyncio as redis
@@ -38,6 +38,8 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 MAX_CONCURRENCY = settings.max_concurrency
+MAX_BATCH_SIZE = settings.max_batch_size
+BATCH_TIMEOUT = settings.batch_timeout
 QUEUE_WORKER_ENABLED = settings.queue_worker_enabled
 REDIS_URL = settings.redis_url
 REDIS_USERNAME = os.getenv("REDIS_USERNAME")
@@ -48,6 +50,19 @@ QUEUE_BRPOP_TIMEOUT = settings.queue_brpop_timeout
 transcription_service: TranscriptionService = None
 redis_client: Optional[redis.Redis] = None
 queue_worker_task: Optional[asyncio.Task] = None
+
+
+def _parse_job_payload(payload: bytes) -> Tuple[str, Optional[TranscriptionRequest]]:
+    """Parse and validate a raw Redis payload into a typed transcription request."""
+    try:
+        job = json.loads(payload.decode())
+        job_id = str(job.get("job_id", "<unknown>"))
+        request_payload: Dict[str, Any] = job.get("request", job)
+        request_model = TranscriptionRequest(**request_payload)
+        return job_id, request_model
+    except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
+        logger.error("Invalid job payload received from queue: %s", exc, exc_info=True)
+        return "<invalid>", None
 
 
 def _redacted_redis_target(redis_url: str) -> str:
@@ -67,48 +82,95 @@ def _build_redis_client() -> redis.Redis:
     return redis.from_url(REDIS_URL, **connection_kwargs)
 
 
-async def _run_job_with_slot(app: FastAPI, job_id: str, request_model: TranscriptionRequest) -> None:
-    """Run a queued transcription job while holding a GPU slot."""
+async def _collect_job_batch() -> List[Tuple[str, TranscriptionRequest]]:
+    """Collect a micro-batch from Redis.
+
+    Strategy:
+      1. Block-wait (BRPOP) until the first job arrives.
+      2. Immediately drain any items already sitting in the queue (no sleep).
+      3. If the batch is still below MAX_BATCH_SIZE, keep polling with short
+         sleeps until BATCH_TIMEOUT expires — this gives nearby producers
+         time to push more work.
+    """
+    if redis_client is None:
+        return []
+
+    batch: List[Tuple[str, TranscriptionRequest]] = []
+
+    # Step 1 — block until at least one job arrives
+    job_data = await redis_client.brpop(QUEUE_NAME, timeout=QUEUE_BRPOP_TIMEOUT)
+    if not job_data:
+        return batch
+
+    _, payload = job_data
+    job_id, request_model = _parse_job_payload(payload)
+    if request_model is not None:
+        batch.append((job_id, request_model))
+
+    # Step 2 — immediately drain everything already queued (no waiting)
+    while len(batch) < MAX_BATCH_SIZE:
+        payload = await redis_client.rpop(QUEUE_NAME)
+        if payload is None:
+            break
+        job_id, request_model = _parse_job_payload(payload)
+        if request_model is not None:
+            batch.append((job_id, request_model))
+
+    # Step 3 — if still room, wait up to BATCH_TIMEOUT for stragglers
+    if len(batch) < MAX_BATCH_SIZE:
+        deadline = asyncio.get_running_loop().time() + BATCH_TIMEOUT
+        while len(batch) < MAX_BATCH_SIZE and asyncio.get_running_loop().time() < deadline:
+            payload = await redis_client.rpop(QUEUE_NAME)
+            if payload is None:
+                await asyncio.sleep(0.01)
+                continue
+            job_id, request_model = _parse_job_payload(payload)
+            if request_model is not None:
+                batch.append((job_id, request_model))
+
+    logger.info("Batch collected: %s/%s items", len(batch), MAX_BATCH_SIZE)
+    return batch
+
+
+async def _process_job_batch(app: FastAPI, jobs: List[Tuple[str, TranscriptionRequest]]) -> None:
+    """Process one micro-batch on the GPU, gated by the GPU semaphore."""
+    if not jobs:
+        return
+
     semaphore: asyncio.Semaphore = app.state.gpu_semaphore
     service: TranscriptionService = app.state.transcription_service
+    request_models = [req for _, req in jobs]
 
-    try:
-        logger.info("Processing queued job %s", job_id)
-        await run_in_threadpool(service.process, request_model)
-        logger.info("Finished queued job %s", job_id)
-    except Exception as exc:
-        logger.error("Queued job %s failed: %s", job_id, exc, exc_info=True)
-    finally:
-        semaphore.release()
+    logger.info(
+        "Batch ready: size=%s, acquiring GPU semaphore…",
+        len(request_models),
+    )
+
+    # Acquire semaphore so only one batch at a time hits the GPU
+    async with semaphore:
+        results = await run_in_threadpool(
+            service.process_batch,
+            request_models,
+        )
+
+    for (job_id, _), (_, _, error) in zip(jobs, results):
+        if error is None:
+            logger.info("Finished queued job %s", job_id)
+        else:
+            logger.error("Queued job %s failed: %s", job_id, error)
 
 
 async def queue_worker(app: FastAPI) -> None:
-    """Continuously consume jobs from Redis and dispatch to the transcription service."""
+    """Continuously consume jobs from Redis and process them as micro-batches."""
     if redis_client is None:
         raise RuntimeError("Redis client is not initialized")
 
-    semaphore: asyncio.Semaphore = app.state.gpu_semaphore
-
     try:
         while True:
-            await semaphore.acquire()
-            job_data = await redis_client.brpop(QUEUE_NAME, timeout=QUEUE_BRPOP_TIMEOUT)
-
-            if job_data:
-                _, payload = job_data
-                try:
-                    job = json.loads(payload.decode())
-                    job_id = str(job.get("job_id", "<unknown>"))
-                    request_payload: Dict[str, Any] = job.get("request", job)
-                    request_model = TranscriptionRequest(**request_payload)
-                except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
-                    logger.error("Invalid job payload received from queue: %s", exc, exc_info=True)
-                    semaphore.release()
-                    continue
-
-                asyncio.create_task(_run_job_with_slot(app, job_id, request_model))
-            else:
-                semaphore.release()
+            jobs = await _collect_job_batch()
+            if not jobs:
+                continue
+            await _process_job_batch(app, jobs)
     except asyncio.CancelledError:
         logger.info("Queue worker cancelled; shutting down consumer loop")
         raise

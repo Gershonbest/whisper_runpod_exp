@@ -64,12 +64,14 @@ class Settings:
     # Logging
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     
-    # Batch processing (if needed)
+    # Batch processing
     max_batch_size: int = int(os.getenv("MAX_BATCH_SIZE", "6"))
-    batch_timeout: float = float(os.getenv("BATCH_TIMEOUT", "0.07"))
+    batch_timeout: float = float(os.getenv("BATCH_TIMEOUT", "0.5"))
     
     # Queue / concurrency configuration
-    max_concurrency: int = int(os.getenv("MAX_CONCURRENCY", "5"))
+    # MAX_CONCURRENCY controls how many batches can run on the GPU at once.
+    # For a single GPU, keep this at 1 — batching > concurrency.
+    max_concurrency: int = int(os.getenv("MAX_CONCURRENCY", "1"))
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     queue_name: str = os.getenv("QUEUE_NAME", "transcription_queue")
     queue_brpop_timeout: int = int(os.getenv("QUEUE_BRPOP_TIMEOUT", "5"))

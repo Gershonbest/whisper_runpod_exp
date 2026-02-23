@@ -52,7 +52,6 @@ class STTService:
         logger.info(f"Starting transcription (task={task}, language={language or 'auto'})...")
         
         model = get_whisper_model()
-        torch.cuda.empty_cache()
         
         # Set transcription parameters
         options_dict = {
@@ -70,17 +69,16 @@ class STTService:
             options_dict["language"] = language.lower()
         
         try:
-            segment_generator, info = model.transcribe(audio_file, **options_dict)
-            
-            segments = []
-            text = ""
-            for segment in segment_generator:
-                segments.append(segment)
-                text += segment.text + " "
-            
-            text = text.strip()
-            
-            torch.cuda.empty_cache()
+            with torch.inference_mode():
+                segment_generator, info = model.transcribe(audio_file, **options_dict)
+                
+                segments = []
+                text = ""
+                for segment in segment_generator:
+                    segments.append(segment)
+                    text += segment.text + " "
+                
+                text = text.strip()
             
             logger.info(
                 f"Transcription completed: language={info.language}, "
@@ -90,9 +88,11 @@ class STTService:
             return text, segments, info.language, info.duration
             
         except Exception as e:
-            torch.cuda.empty_cache()
             logger.error(f"Transcription failed: {e}")
             raise
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     def process_with_diarization(
         self,
